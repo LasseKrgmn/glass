@@ -1,9 +1,10 @@
-let spawn, path, EventEmitter;
+let spawn, path, EventEmitter, os;
 
 if (typeof window === 'undefined') {
     spawn = require('child_process').spawn;
     path = require('path');
     EventEmitter = require('events').EventEmitter;
+    os = require('os');
 } else {
     class DummyEventEmitter {
         on() {}
@@ -13,12 +14,34 @@ if (typeof window === 'undefined') {
     EventEmitter = DummyEventEmitter;
 }
 
+// whisper.cpp performance tuning. Defaults favour realtime latency and are
+// hardware-aware (thread count capped to the available CPUs); every value can
+// be overridden through the environment so the MCP client config / headless
+// callers can adapt them without code changes.
+//   GLASS_WHISPER_THREADS   – CPU threads for the decoder (default: min(8, #cpus))
+//   GLASS_WHISPER_BEAM_SIZE – beam size / best-of (default: 1 → greedy, fastest)
+// The encoder runs on the GPU (Metal on Apple Silicon) with flash-attention,
+// which whisper-cli enables by default, so these mostly govern the decoder.
+const _env = (typeof process !== 'undefined' && process.env) ? process.env : {};
+const DEFAULT_WHISPER_THREADS = Math.max(
+    1,
+    parseInt(_env.GLASS_WHISPER_THREADS, 10) || Math.min(8, (os?.cpus?.().length || 4))
+);
+const DEFAULT_WHISPER_BEAM_SIZE = Math.max(1, parseInt(_env.GLASS_WHISPER_BEAM_SIZE, 10) || 1);
+
 class WhisperSTTSession extends EventEmitter {
-    constructor(model, whisperService, sessionId) {
+    constructor(model, whisperService, sessionId, options = {}) {
         super();
         this.model = model;
         this.whisperService = whisperService;
         this.sessionId = sessionId || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        // Force the spoken language when the caller provides one (e.g. 'de');
+        // 'auto' keeps whisper's per-chunk language detection. Pinning the
+        // language is both faster (no detection pass) and more accurate on the
+        // short realtime chunks than auto-detect.
+        this.language = options.language || 'auto';
+        this.threads = options.threads || DEFAULT_WHISPER_THREADS;
+        this.beamSize = options.beamSize || DEFAULT_WHISPER_BEAM_SIZE;
         this.process = null;
         this.isRunning = false;
         this.audioBuffer = Buffer.alloc(0);
@@ -77,8 +100,10 @@ class WhisperSTTSession extends EventEmitter {
                 '--no-timestamps',
                 '--output-txt',
                 '--output-json',
-                '--language', 'auto',
-                '--threads', '4',
+                '--language', this.language,
+                '--threads', String(this.threads),
+                '--beam-size', String(this.beamSize),
+                '--best-of', String(this.beamSize),
                 '--print-progress', 'false'
             ]);
 
@@ -200,7 +225,11 @@ class WhisperProvider {
         
         // Create unique session ID based on type
         const sessionId = `${sessionType}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-        const session = new WhisperSTTSession(model, this.whisperService, sessionId);
+        // Pin the spoken language when the caller specified one (GLASS_LANGUAGE
+        // in the MCP config flows here as config.language). whisper wants a bare
+        // code like 'de'; strip any region suffix such as 'de-DE'.
+        const language = config.language ? String(config.language).split('-')[0].toLowerCase() : 'auto';
+        const session = new WhisperSTTSession(model, this.whisperService, sessionId, { language });
         
         // Log session creation
         console.log(`[WhisperProvider] Created session: ${sessionId}`);

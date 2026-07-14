@@ -14,6 +14,21 @@ function getModelStateService() {
 
 const COMPLETION_DEBOUNCE_MS = 2000;
 
+// Whisper hallucinates scene/sound tags on silence or background noise, in the
+// *transcription language* — e.g. [Musik], (Applaus), * Musik *, *Ticken* for
+// German, as well as the English [BLANK_AUDIO]/[MUSIC]/[NOISE]. Strip every
+// bracketed [..], parenthesised (..) and *asterisk* tag group (case/lang
+// agnostic); any genuine speech in the same utterance is preserved. Returns the
+// cleaned text — an empty result means the utterance was pure noise.
+function stripWhisperNoise(text) {
+    return String(text)
+        .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\*[^*]*\*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 // ── New heartbeat / renewal constants ────────────────────────────────────────────
 // Interval to send low-cost keep-alive messages so the remote service does not
 // treat the connection as idle. One minute is safely below the typical 2-5 min
@@ -195,30 +210,11 @@ class SttService {
             if (this.modelInfo.provider === 'whisper') {
                 // Whisper STT emits 'transcription' events with different structure
                 if (message.text && message.text.trim()) {
-                    const finalText = message.text.trim();
-                    
-                    // Filter out Whisper noise transcriptions
-                    const noisePatterns = [
-                        '[BLANK_AUDIO]',
-                        '[INAUDIBLE]',
-                        '[MUSIC]',
-                        '[SOUND]',
-                        '[NOISE]',
-                        '(BLANK_AUDIO)',
-                        '(INAUDIBLE)',
-                        '(MUSIC)',
-                        '(SOUND)',
-                        '(NOISE)'
-                    ];
-                    
-                    const isNoise = noisePatterns.some(pattern => 
-                        finalText.includes(pattern) || finalText === pattern
-                    );
-                    
-                    
-                    if (!isNoise && finalText.length > 2) {
+                    const finalText = stripWhisperNoise(message.text);
+
+                    if (finalText.length > 2) {
                         this.debounceMyCompletion(finalText);
-                        
+
                         this.sendToRenderer('stt-update', {
                             speaker: 'Me',
                             text: finalText,
@@ -227,7 +223,7 @@ class SttService {
                             timestamp: Date.now(),
                         });
                     } else {
-                        console.log(`[Whisper-Me] Filtered noise: "${finalText}"`);
+                        console.log(`[Whisper-Me] Filtered noise: "${message.text.trim()}"`);
                     }
                 }
                 return;
@@ -336,31 +332,13 @@ class SttService {
             if (this.modelInfo.provider === 'whisper') {
                 // Whisper STT emits 'transcription' events with different structure
                 if (message.text && message.text.trim()) {
-                    const finalText = message.text.trim();
-                    
-                    // Filter out Whisper noise transcriptions
-                    const noisePatterns = [
-                        '[BLANK_AUDIO]',
-                        '[INAUDIBLE]',
-                        '[MUSIC]',
-                        '[SOUND]',
-                        '[NOISE]',
-                        '(BLANK_AUDIO)',
-                        '(INAUDIBLE)',
-                        '(MUSIC)',
-                        '(SOUND)',
-                        '(NOISE)'
-                    ];
-                    
-                    const isNoise = noisePatterns.some(pattern => 
-                        finalText.includes(pattern) || finalText === pattern
-                    );
-                    
-                    
-                    // Only process if it's not noise, not a false positive, and has meaningful content
-                    if (!isNoise && finalText.length > 2) {
+                    const finalText = stripWhisperNoise(message.text);
+
+                    // Only process if there is meaningful content left after
+                    // stripping Whisper's noise/scene tags.
+                    if (finalText.length > 2) {
                         this.debounceTheirCompletion(finalText);
-                        
+
                         this.sendToRenderer('stt-update', {
                             speaker: 'Them',
                             text: finalText,
@@ -369,7 +347,7 @@ class SttService {
                             timestamp: Date.now(),
                         });
                     } else {
-                        console.log(`[Whisper-Them] Filtered noise: "${finalText}"`);
+                        console.log(`[Whisper-Them] Filtered noise: "${message.text.trim()}"`);
                     }
                 }
                 return;
@@ -482,6 +460,7 @@ class SttService {
         
         const sttOptions = {
             apiKey: this.modelInfo.apiKey,
+            model: this.modelInfo.model,
             language: effectiveLanguage,
             usePortkey: this.modelInfo.provider === 'openai-glass',
             portkeyVirtualKey: this.modelInfo.provider === 'openai-glass' ? this.modelInfo.apiKey : undefined,
@@ -787,6 +766,14 @@ class SttService {
             clearTimeout(this.sessionRenewTimeout);
             this.sessionRenewTimeout = null;
         }
+
+        // Flush any buffered-but-not-yet-debounced transcription before tearing
+        // down, so the final utterance is never dropped. This matters for batch
+        // transcription (transcribe_audio closes right after feeding audio, i.e.
+        // before the 2 s completion debounce fires) and for live listen_stop
+        // ending mid-utterance. Runs while modelInfo/callbacks are still set.
+        this.flushMyCompletion();
+        this.flushTheirCompletion();
 
         // Clear timers
         if (this.myCompletionTimer) {
