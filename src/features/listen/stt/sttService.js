@@ -1,7 +1,16 @@
-const { BrowserWindow } = require('electron');
 const { spawn } = require('child_process');
 const { createSTT } = require('../../common/ai/factory');
-const modelStateService = require('../../common/services/modelStateService');
+
+// modelStateService pulls in Electron-only modules (electron-store, keytar…).
+// It is loaded lazily so this service can also run headless (e.g. inside the
+// MCP server) where the model info is injected directly instead.
+let _modelStateService = null;
+function getModelStateService() {
+    if (!_modelStateService) {
+        _modelStateService = require('../../common/services/modelStateService');
+    }
+    return _modelStateService;
+}
 
 const COMPLETION_DEBOUNCE_MS = 2000;
 
@@ -44,7 +53,9 @@ class SttService {
         this.onTranscriptionComplete = null;
         this.onStatusUpdate = null;
 
-        this.modelInfo = null; 
+        this.modelInfo = null;
+        // Set via initializeSttSessions() in headless/MCP mode to bypass modelStateService.
+        this.modelInfoOverride = null;
     }
 
     setCallbacks({ onTranscriptionComplete, onStatusUpdate }) {
@@ -54,9 +65,15 @@ class SttService {
 
     sendToRenderer(channel, data) {
         // Listen 관련 이벤트는 Listen 윈도우에만 전송 (Ask 윈도우 충돌 방지)
-        const { windowPool } = require('../../../window/windowManager');
+        // In headless mode (MCP server) there is no window manager — ignore.
+        let windowPool;
+        try {
+            ({ windowPool } = require('../../../window/windowManager'));
+        } catch {
+            return;
+        }
         const listenWindow = windowPool?.get('listen');
-        
+
         if (listenWindow && !listenWindow.isDestroyed()) {
             listenWindow.webContents.send(channel, data);
         }
@@ -149,10 +166,19 @@ class SttService {
         this.theirCompletionTimer = setTimeout(() => this.flushTheirCompletion(), COMPLETION_DEBOUNCE_MS);
     }
 
-    async initializeSttSessions(language = 'en') {
+    /**
+     * @param {string} language
+     * @param {{provider: string, model: string, apiKey: string}|null} modelInfoOverride
+     *        When provided (headless/MCP mode), skips modelStateService entirely.
+     *        The override is remembered so session auto-renewal keeps using it.
+     */
+    async initializeSttSessions(language = 'en', modelInfoOverride = null) {
         const effectiveLanguage = process.env.OPENAI_TRANSCRIBE_LANG || language || 'en';
 
-        const modelInfo = await modelStateService.getCurrentModelInfo('stt');
+        if (modelInfoOverride) {
+            this.modelInfoOverride = modelInfoOverride;
+        }
+        const modelInfo = this.modelInfoOverride || await getModelStateService().getCurrentModelInfo('stt');
         if (!modelInfo || !modelInfo.apiKey) {
             throw new Error('AI model or API key is not configured.');
         }
@@ -554,7 +580,7 @@ class SttService {
         let modelInfo = this.modelInfo;
         if (!modelInfo) {
             console.warn('[SttService] modelInfo not found, fetching on-the-fly as a fallback...');
-            modelInfo = await modelStateService.getCurrentModelInfo('stt');
+            modelInfo = this.modelInfoOverride || await getModelStateService().getCurrentModelInfo('stt');
         }
         if (!modelInfo) {
             throw new Error('STT model info could not be retrieved.');
@@ -579,7 +605,7 @@ class SttService {
         let modelInfo = this.modelInfo;
         if (!modelInfo) {
             console.warn('[SttService] modelInfo not found, fetching on-the-fly as a fallback...');
-            modelInfo = await modelStateService.getCurrentModelInfo('stt');
+            modelInfo = this.modelInfoOverride || await getModelStateService().getCurrentModelInfo('stt');
         }
         if (!modelInfo) {
             throw new Error('STT model info could not be retrieved.');
@@ -632,11 +658,17 @@ class SttService {
         await this.killExistingSystemAudioDump();
         console.log('Starting macOS audio capture for "Them"...');
 
-        const { app } = require('electron');
         const path = require('path');
-        const systemAudioPath = app.isPackaged
-            ? path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'ui', 'assets', 'SystemAudioDump')
-            : path.join(app.getAppPath(), 'src', 'ui', 'assets', 'SystemAudioDump');
+        let systemAudioPath;
+        try {
+            const { app } = require('electron');
+            systemAudioPath = app.isPackaged
+                ? path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'ui', 'assets', 'SystemAudioDump')
+                : path.join(app.getAppPath(), 'src', 'ui', 'assets', 'SystemAudioDump');
+        } catch {
+            // Headless (MCP server) mode: resolve relative to the repository layout.
+            systemAudioPath = path.join(__dirname, '..', '..', '..', 'ui', 'assets', 'SystemAudioDump');
+        }
 
         console.log('SystemAudioDump path:', systemAudioPath);
 
@@ -665,7 +697,7 @@ class SttService {
         let modelInfo = this.modelInfo;
         if (!modelInfo) {
             console.warn('[SttService] modelInfo not found, fetching on-the-fly as a fallback...');
-            modelInfo = await modelStateService.getCurrentModelInfo('stt');
+            modelInfo = this.modelInfoOverride || await getModelStateService().getCurrentModelInfo('stt');
         }
         if (!modelInfo) {
             throw new Error('STT model info could not be retrieved.');

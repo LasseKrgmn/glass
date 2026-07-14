@@ -83,6 +83,20 @@ npm run setup
 </p>
 
 
+## MCP Server (headless, for LLM agents)
+
+Glass can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an
+LLM client (e.g. Claude) can autonomously start listening sessions, read live transcripts
+incrementally, capture screenshots, and store structured summaries — no UI, fully
+configured via the MCP client config. Transcription keeps the existing providers and
+model selection (OpenAI / Gemini / Deepgram / local Whisper).
+
+```bash
+npm run mcp   # or: node src/mcp/server.js
+```
+
+See [docs/MCP_SERVER.md](./docs/MCP_SERVER.md) for configuration and the tool reference.
+
 ## Keyboard Shortcuts
 
 `Ctrl/Cmd + \` : show and hide main window

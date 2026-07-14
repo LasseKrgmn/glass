@@ -1,0 +1,132 @@
+# Glass MCP Server
+
+Glass as a [Model Context Protocol](https://modelcontextprotocol.io) server: the full Glass
+feature set (live listening & transcription, screen capture, session records, structured
+summaries, prompt profiles) exposed as tools for **autonomous use by an LLM client** —
+no Electron app, no setup wizard, no settings UI. Everything is configured through the
+MCP client config.
+
+## Design: the client LLM is the brain
+
+The desktop app calls its own LLM for "Ask" answers and live summaries. The MCP server
+deliberately does **not**: the connected LLM pulls exactly the context it needs and does
+the reasoning itself. That is the most token-efficient split:
+
+- **Transcripts are delivered incrementally.** `get_transcript` is cursor-based — every
+  call returns only the lines that are new since the last call, as plain
+  `[Me]/[Them]` text lines (no JSON overhead).
+- **Screenshots are downsized JPEGs** (default height 384 px, quality 80 — the same
+  values the desktop app uses) so a "look at my screen" costs few image tokens.
+- **Summaries flow the other way**: the client LLM generates the analysis and persists
+  it via `save_summary` as structured knowledge.
+
+**Only transcription (STT) keeps the existing Glass provider methods and model
+selection** — OpenAI, Gemini, Deepgram, or local Whisper (whisper.cpp, auto-installed
+on first use) — selected via environment variables instead of the settings UI. The
+same `SttService` code path as the desktop app is used, including keep-alive and
+20-minute session auto-renewal.
+
+## Quick start
+
+```bash
+npm install
+```
+
+Register the server in your MCP client config (e.g. Claude Desktop
+`claude_desktop_config.json`, Claude Code `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "glass": {
+      "command": "node",
+      "args": ["/absolute/path/to/glass/src/mcp/server.js"],
+      "env": {
+        "GLASS_STT_PROVIDER": "deepgram",
+        "GLASS_STT_MODEL": "nova-3",
+        "DEEPGRAM_API_KEY": "dg_…",
+        "GLASS_LANGUAGE": "de",
+        "GLASS_CAPTURE": "both"
+      }
+    }
+  }
+}
+```
+
+Fully local variant (no API key, whisper.cpp is installed to `~/.glass/whisper`
+automatically on first use):
+
+```json
+{
+  "mcpServers": {
+    "glass": {
+      "command": "node",
+      "args": ["/absolute/path/to/glass/src/mcp/server.js"],
+      "env": {
+        "GLASS_STT_PROVIDER": "whisper",
+        "GLASS_STT_MODEL": "whisper-base",
+        "GLASS_LANGUAGE": "en"
+      }
+    }
+  }
+}
+```
+
+## Configuration (all via MCP `env`, no UI)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GLASS_STT_PROVIDER` | `whisper` | `openai`, `gemini`, `deepgram`, `whisper` (local), `openai-glass` |
+| `GLASS_STT_MODEL` | per provider | e.g. `gpt-4o-mini-transcribe`, `gemini-live-2.5-flash-preview`, `nova-3`, `whisper-tiny/base/small/medium` |
+| `OPENAI_API_KEY` / `GEMINI_API_KEY` / `DEEPGRAM_API_KEY` | – | API key for the chosen cloud provider |
+| `GLASS_STT_API_KEY` | – | Provider-agnostic key override (required for `openai-glass`) |
+| `GLASS_LANGUAGE` | `en` | Transcription language code |
+| `GLASS_CAPTURE` | `both` (macOS), `mic` (else) | Audio sources for `listen_start`: `mic`, `system`, `both`, `none` |
+| `GLASS_MIC_DEVICE` | OS default | ffmpeg input device (macOS: avfoundation index; Linux: pulse source; Windows: dshow name — **required** on Windows) |
+| `GLASS_FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg (needed for mic capture and `transcribe_audio`) |
+| `GLASS_SCREENSHOT_HEIGHT` | `384` | Default screenshot height in px |
+| `GLASS_SCREENSHOT_QUALITY` | `80` | Default screenshot JPEG quality |
+| `GLASS_DATA_DIR` | `~/.glass/mcp` | Where sessions/transcripts/summaries are stored (JSON/JSONL, no native DB) |
+
+Audio capture requirements:
+
+- **Microphone** (all platforms): `ffmpeg` must be installed.
+- **System audio** ("Them" side, e.g. the other meeting participants): macOS only,
+  via the bundled `SystemAudioDump` binary — the same method the desktop app uses.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `listen_start` | Start live capture + realtime transcription (`language`, `title` optional). One active session at a time. |
+| `listen_status` | Cheap status probe: duration, line count, active audio sources. |
+| `get_transcript` | Cursor-based transcript read. Pass the `cursor` from the previous response to get **only new lines**. |
+| `listen_stop` | Stop the session, persist it, return stats. |
+| `capture_screenshot` | Downsized JPEG of the user's screen (`height`, `quality` optional). |
+| `transcribe_audio` | Batch-transcribe an audio file (anything ffmpeg decodes) with the configured provider. |
+| `list_sessions` / `get_session` / `delete_session` | Browse and manage stored session records. |
+| `save_summary` | Persist the **client LLM's own** summary/bullets/action items for a session. |
+
+## Prompts
+
+The Glass prompt profiles from the desktop app are exposed as MCP prompts, generated by
+the same `promptBuilder`: `interview`, `pickle_glass`, `sales`, `meeting`,
+`presentation`, `negotiation`, `pickle_glass_analysis`. Each accepts an optional
+`context` argument (goals, background, transcript excerpts).
+
+## Typical autonomous flow
+
+1. `listen_start` `{ "language": "de", "title": "Weekly Sync" }`
+2. Periodically `get_transcript` `{ "cursor": <from previous call> }` → only deltas.
+3. Client LLM analyzes (optionally using the `meeting` prompt profile), optionally
+   `capture_screenshot` for on-screen context.
+4. `save_summary` `{ "tldr": …, "bullets": […], "actions": […] }`
+5. `listen_stop`
+
+## Storage
+
+Sessions are stored file-based under `GLASS_DATA_DIR` (default `~/.glass/mcp`):
+`sessions.json`, `transcripts/<id>.jsonl`, `summaries/<id>.json`. This mirrors the
+logical schema of the desktop app's SQLite database but keeps the MCP server free of
+native-module dependencies (it runs on plain Node, no Electron rebuild needed). The
+desktop app's database is not shared.
