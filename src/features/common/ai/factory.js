@@ -71,6 +71,14 @@ const PROVIDERS = {
       llmModels: [], // Dynamic models populated from installed Ollama models
       sttModels: [], // Ollama doesn't support STT yet
   },
+  'mcp': {
+      name: 'MCP Client (e.g. Claude Code)',
+      handler: () => require("./providers/mcpBridge"),
+      llmModels: [
+          { id: 'mcp-client', name: 'Connected MCP client model' },
+      ],
+      sttModels: [],
+  },
   'whisper': {
       name: 'Whisper (Local)',
       handler: () => {
@@ -158,7 +166,8 @@ function getProviderClass(providerId) {
         'gemini': 'GeminiProvider',
         'deepgram': 'DeepgramProvider',
         'ollama': 'OllamaProvider',
-        'whisper': 'WhisperProvider'
+        'whisper': 'WhisperProvider',
+        'mcp': 'MCPBridgeProvider'
     };
     
     const className = classNameMap[actualProviderId];

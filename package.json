@@ -15,7 +15,7 @@
         "lint": "eslint --ext .ts,.tsx,.js .",
         "postinstall": "electron-builder install-app-deps",
         "build:renderer": "node build.js",
-        "mcp": "node src/mcp/server.js",
+        "mcp": "electron . --mcp",
         "build:web": "cd pickleglass_web && npm run build && cd ..",
         "build:all": "npm run build:renderer && npm run build:web",
         "watch:renderer": "node build.js --watch"

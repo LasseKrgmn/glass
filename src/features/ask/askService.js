@@ -447,4 +447,8 @@ class AskService {
 
 const askService = new AskService();
 
+// Expose the capture function so the MCP server can reuse the exact same
+// screenshot path (screencapture on macOS, desktopCapturer elsewhere).
+askService.captureScreenshot = captureScreenshot;
+
 module.exports = askService;

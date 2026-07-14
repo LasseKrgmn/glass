@@ -83,16 +83,18 @@ npm run setup
 </p>
 
 
-## MCP Server (headless, for LLM agents)
+## MCP Mode (drive Glass with Claude Code)
 
-Glass can run as a [Model Context Protocol](https://modelcontextprotocol.io) server so an
-LLM client (e.g. Claude) can autonomously start listening sessions, read live transcripts
-incrementally, capture screenshots, and store structured summaries — no UI, fully
-configured via the MCP client config. Transcription keeps the existing providers and
-model selection (OpenAI / Gemini / Deepgram / local Whisper).
+With `electron . --mcp` the **full app** (incl. teleprompter UI) runs as a
+[Model Context Protocol](https://modelcontextprotocol.io) server: no setup wizard —
+everything is configured via the MCP client config; transcription keeps the existing
+providers and model selection (OpenAI / Gemini / Deepgram / local Whisper); and Ask
+answers + live summaries come from the **connected MCP client model** (e.g. your Claude
+subscription via Claude Code) instead of a vendor API key. Tools like
+`listen_start`/`listen_stop` stay fully in sync with the UI buttons.
 
 ```bash
-npm run mcp   # or: node src/mcp/server.js
+npm run mcp   # manual start; see docs for the MCP client config
 ```
 
 See [docs/MCP_SERVER.md](./docs/MCP_SERVER.md) for configuration and the tool reference.

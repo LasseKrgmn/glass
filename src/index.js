@@ -7,6 +7,18 @@
 
 require('dotenv').config();
 
+// ── MCP mode ────────────────────────────────────────────────────────────────
+// `electron . --mcp` (or GLASS_MCP=1) runs the full app as an MCP server on
+// stdio. The MCP transport owns stdout, so ALL logging must go to stderr —
+// redirect before anything else writes.
+const IS_MCP_MODE = process.argv.includes('--mcp') || process.env.GLASS_MCP === '1';
+if (IS_MCP_MODE) {
+    for (const level of ['log', 'info', 'warn', 'debug']) {
+        console[level] = (...args) => console.error(...args);
+    }
+    console.error('[MCP] Glass starting in MCP mode');
+}
+
 if (require('electron-squirrel-startup')) {
     process.exit(0);
 }
@@ -162,6 +174,9 @@ if (process.platform === 'win32') {
 
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
+    if (IS_MCP_MODE) {
+        console.error('[MCP] Another Glass instance is already running — quit it first, then reconnect the MCP client.');
+    }
     app.quit();
     process.exit(0);
 }
@@ -198,6 +213,24 @@ app.whenReady().then(async () => {
         await modelStateService.initialize();
         //////// after_modelStateService ////////
 
+        // MCP mode: seed provider settings from the MCP client env config so
+        // no setup/API-key UI is needed. Normal mode: drop a leftover 'mcp'
+        // pseudo provider from a previous MCP-mode run.
+        const mcpBootstrap = require('./mcp/bootstrap');
+        if (IS_MCP_MODE) {
+            try {
+                await mcpBootstrap.seedModelState();
+            } catch (err) {
+                // Bad env config (unknown provider, missing key): fail fast so
+                // the MCP client surfaces the message instead of a UI dialog.
+                console.error('[MCP] fatal:', err.message);
+                app.exit(1);
+                return;
+            }
+        } else {
+            await mcpBootstrap.cleanupAfterMcpMode();
+        }
+
         featureBridge.initialize();  // 추가: featureBridge 초기화
         windowBridge.initialize();
         setupWebDataHandlers();
@@ -220,6 +253,10 @@ app.whenReady().then(async () => {
         console.log('Web front-end listening on', WEB_PORT);
         
         createWindows();
+
+        if (IS_MCP_MODE) {
+            await mcpBootstrap.startServer();
+        }
 
     } catch (err) {
         console.error('>>> [index.js] Database initialization failed - some features may not work', err);

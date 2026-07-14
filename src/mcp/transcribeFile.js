@@ -57,8 +57,8 @@ async function transcribeFile(config, filePath, language) {
         throw new Error(`Audio file not found: ${filePath}`);
     }
 
-    const { stt, capture } = config;
-    const pcm = await decodeToPcm(capture.ffmpegPath, filePath, stt.sampleRate);
+    const { stt, ffmpegPath } = config;
+    const pcm = await decodeToPcm(ffmpegPath, filePath, stt.sampleRate);
     if (pcm.length === 0) {
         throw new Error('Decoded audio is empty.');
     }
@@ -68,6 +68,8 @@ async function transcribeFile(config, filePath, language) {
     let lastFinalAt = Date.now();
 
     const sttService = new SttService();
+    // Batch transcription must not leak stt-update events into the listen UI.
+    sttService.sendToRenderer = () => {};
     sttService.setCallbacks({
         onTranscriptionComplete: (_speaker, text) => {
             segments.push(text);

@@ -1,13 +1,12 @@
 /**
- * MCP server configuration.
+ * MCP-mode configuration for Glass.
  *
- * Everything is driven by environment variables set in the MCP client config
- * (e.g. claude_desktop_config.json / .mcp.json) — there is no setup or
- * settings UI. Transcription keeps the existing Glass provider methods and
- * model selection; the provider/model is chosen here once at startup.
+ * When the app is started as an MCP server (electron . --mcp), everything the
+ * setup wizard / settings UI used to configure comes from environment
+ * variables in the MCP client config instead. Only transcription (STT) has a
+ * selectable provider/model here — the LLM side is always the MCP client
+ * model (the LLM that is connected to this server).
  */
-const os = require('os');
-const path = require('path');
 const { PROVIDERS } = require('../features/common/ai/factory');
 
 const DEFAULT_STT_MODELS = {
@@ -22,6 +21,10 @@ const API_KEY_ENV = {
     gemini: 'GEMINI_API_KEY',
     deepgram: 'DEEPGRAM_API_KEY',
 };
+
+function isMcpMode(argv = process.argv, env = process.env) {
+    return argv.includes('--mcp') || env.GLASS_MCP === '1';
+}
 
 function buildConfig(env = process.env) {
     const provider = (env.GLASS_STT_PROVIDER || 'whisper').toLowerCase();
@@ -52,14 +55,9 @@ function buildConfig(env = process.env) {
     }
 
     // Whisper.cpp consumes 16 kHz PCM16 mono; the realtime cloud providers
-    // (OpenAI / Gemini / Deepgram) are fed 24 kHz PCM16 mono, matching what
-    // the Electron renderer capture pipeline sends.
+    // are fed 24 kHz PCM16 mono (only relevant for the transcribe_audio tool —
+    // live capture keeps the renderer pipeline of the Electron app).
     const sampleRate = provider === 'whisper' ? 16000 : 24000;
-
-    const capture = (env.GLASS_CAPTURE || (process.platform === 'darwin' ? 'both' : 'mic')).toLowerCase();
-    if (!['mic', 'system', 'both', 'none'].includes(capture)) {
-        throw new Error(`GLASS_CAPTURE must be one of mic|system|both|none, got "${capture}"`);
-    }
 
     return {
         stt: {
@@ -69,17 +67,17 @@ function buildConfig(env = process.env) {
             language: env.GLASS_LANGUAGE || 'en',
             sampleRate,
         },
-        capture: {
-            mode: capture,                       // mic | system | both | none
-            micDevice: env.GLASS_MIC_DEVICE || null, // ffmpeg input device name/index
-            ffmpegPath: env.GLASS_FFMPEG_PATH || 'ffmpeg',
+        llm: {
+            // Seconds to wait for the MCP client model to answer an app-internal
+            // request (Ask / live summary) before failing that request.
+            timeoutS: parseInt(env.GLASS_LLM_TIMEOUT_S || '300', 10),
         },
         screenshot: {
             height: parseInt(env.GLASS_SCREENSHOT_HEIGHT || '384', 10),
             quality: parseInt(env.GLASS_SCREENSHOT_QUALITY || '80', 10),
         },
-        dataDir: env.GLASS_DATA_DIR || path.join(os.homedir(), '.glass', 'mcp'),
+        ffmpegPath: env.GLASS_FFMPEG_PATH || 'ffmpeg', // only needed for transcribe_audio
     };
 }
 
-module.exports = { buildConfig, DEFAULT_STT_MODELS };
+module.exports = { buildConfig, isMcpMode, DEFAULT_STT_MODELS };
