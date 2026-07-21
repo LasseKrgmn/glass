@@ -103,6 +103,42 @@ function arrayBufferToBase64(buffer) {
     return btoa(binary);
 }
 
+/**
+ * Streaming linear resampler (state kept across calls so chunk boundaries don't
+ * click). We deliberately run the AudioContext at the output device's NATIVE
+ * rate — forcing a 24 kHz context makes Chromium/CoreAudio pull the shared
+ * output device down to 24 kHz on macOS, so everything the user hears (and what
+ * SystemAudioDump then captures) plays back deep and slow. Instead we capture at
+ * the native rate and downsample the PCM to the 24 kHz the STT pipeline / AEC
+ * expect, here in JS.
+ */
+function createResampler(inputRate, outputRate) {
+    if (!inputRate || inputRate === outputRate) {
+        return input => input;
+    }
+    const step = inputRate / outputRate; // input samples consumed per output sample
+    let carry = new Float32Array(0);     // leftover input samples for the next call
+    let pos = 0;                         // fractional read position within (carry + input)
+    return input => {
+        const buf = new Float32Array(carry.length + input.length);
+        buf.set(carry, 0);
+        buf.set(input, carry.length);
+
+        const out = [];
+        let i = pos;
+        while (i + 1 < buf.length) {
+            const idx = Math.floor(i);
+            const frac = i - idx;
+            out.push(buf[idx] * (1 - frac) + buf[idx + 1] * frac);
+            i += step;
+        }
+        const keepFrom = Math.min(Math.floor(i), buf.length);
+        carry = new Float32Array(buf.subarray(keepFrom));
+        pos = i - keepFrom;
+        return Float32Array.from(out);
+    };
+}
+
 /* ───────────────────────── JS ↔︎ WASM 헬퍼 ───────────────────────── */
 function int16PtrFromFloat32(mod, f32) {
   const len   = f32.length;
@@ -295,8 +331,12 @@ async function setupMicProcessing(micStream) {
     if (!aecPtr) aecPtr = mod.newPtr(160, 1600, 24000, 1);
 
 
-    const micAudioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-    await micAudioContext.resume(); 
+    // Native device rate — do NOT force 24 kHz (that reconfigures the shared
+    // output device on macOS → deep/slow playback). Resample to 24 kHz in JS.
+    const micAudioContext = new AudioContext();
+    await micAudioContext.resume();
+    const resampleMic = createResampler(micAudioContext.sampleRate, SAMPLE_RATE);
+    console.log(`[listenCapture] mic AudioContext @ ${micAudioContext.sampleRate} Hz → resampling to ${SAMPLE_RATE} Hz`);
     const micSource = micAudioContext.createMediaStreamSource(micStream);
     const micProcessor = micAudioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
@@ -305,7 +345,7 @@ async function setupMicProcessing(micStream) {
 
     micProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        audioBuffer.push(...inputData);
+        audioBuffer.push(...resampleMic(inputData));
         // console.log('🎤 micProcessor.onaudioprocess');
 
         // samplesPerChunk(=2400) 만큼 모이면 전송
@@ -344,7 +384,8 @@ async function setupMicProcessing(micStream) {
 
 function setupLinuxMicProcessing(micStream) {
     // Setup microphone audio processing for Linux
-    const micAudioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const micAudioContext = new AudioContext();
+    const resampleMic = createResampler(micAudioContext.sampleRate, SAMPLE_RATE);
     const micSource = micAudioContext.createMediaStreamSource(micStream);
     const micProcessor = micAudioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
@@ -353,7 +394,7 @@ function setupLinuxMicProcessing(micStream) {
 
     micProcessor.onaudioprocess = async e => {
         const inputData = e.inputBuffer.getChannelData(0);
-        audioBuffer.push(...inputData);
+        audioBuffer.push(...resampleMic(inputData));
 
         // Process audio in chunks
         while (audioBuffer.length >= samplesPerChunk) {
@@ -376,7 +417,8 @@ function setupLinuxMicProcessing(micStream) {
 }
 
 function setupSystemAudioProcessing(systemStream) {
-    const systemAudioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const systemAudioContext = new AudioContext();
+    const resampleSystem = createResampler(systemAudioContext.sampleRate, SAMPLE_RATE);
     const systemSource = systemAudioContext.createMediaStreamSource(systemStream);
     const systemProcessor = systemAudioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
@@ -386,8 +428,8 @@ function setupSystemAudioProcessing(systemStream) {
     systemProcessor.onaudioprocess = async e => {
         const inputData = e.inputBuffer.getChannelData(0);
         if (!inputData || inputData.length === 0) return;
-        
-        audioBuffer.push(...inputData);
+
+        audioBuffer.push(...resampleSystem(inputData));
 
         while (audioBuffer.length >= samplesPerChunk) {
             const chunk = audioBuffer.splice(0, samplesPerChunk);
@@ -452,11 +494,16 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
             try {
                 micMediaStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
-                        sampleRate: SAMPLE_RATE,
+                        // Do NOT force the mic rate (we resample in JS) and disable
+                        // the browser echo-cancellation / processing: on macOS that
+                        // activates the VoiceProcessingIO audio unit, which
+                        // reconfigures the shared OUTPUT device sample rate and makes
+                        // playback deep/slow (or alien after a restart). Glass runs
+                        // its own WASM AEC (runAecSync) against the system-audio ref.
                         channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false,
                     },
                     video: false,
                 });

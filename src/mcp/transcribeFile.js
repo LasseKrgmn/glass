@@ -83,6 +83,9 @@ async function transcribeFile(config, filePath, language) {
             provider: stt.provider,
             model: stt.model,
             apiKey: stt.apiKey,
+            // Audio is ffmpeg-decoded to stt.sampleRate above; hand that real
+            // rate to the whisper WAV header (overrides the live 24 kHz default).
+            sampleRate: stt.sampleRate,
         });
 
         const chunkSize = stt.sampleRate * BYTES_PER_SAMPLE * CHUNK_DURATION_S;

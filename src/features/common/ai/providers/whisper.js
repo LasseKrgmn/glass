@@ -42,6 +42,12 @@ class WhisperSTTSession extends EventEmitter {
         this.language = options.language || 'auto';
         this.threads = options.threads || DEFAULT_WHISPER_THREADS;
         this.beamSize = options.beamSize || DEFAULT_WHISPER_BEAM_SIZE;
+        // Sample rate of the incoming PCM. The live Electron capture pipeline
+        // sends 24 kHz; the batch transcribe_audio path decodes to 16 kHz. This
+        // MUST match the WAV header written for whisper — otherwise whisper mis-
+        // reads the samples (e.g. 24 kHz tagged as 16 kHz plays back 1.5x slow /
+        // pitched down) and transcription is garbage.
+        this.inputSampleRate = options.sampleRate || 16000;
         this.process = null;
         this.isRunning = false;
         this.audioBuffer = Buffer.alloc(0);
@@ -64,7 +70,7 @@ class WhisperSTTSession extends EventEmitter {
 
     startProcessingLoop() {
         this.processingInterval = setInterval(async () => {
-            const minBufferSize = 16000 * 2 * 0.15;
+            const minBufferSize = this.inputSampleRate * 2 * 0.15;
             if (this.audioBuffer.length >= minBufferSize && !this.process) {
                 console.log(`[WhisperSTT-${this.sessionId}] Processing audio chunk, buffer size: ${this.audioBuffer.length}`);
                 await this.processAudioChunk();
@@ -79,7 +85,7 @@ class WhisperSTTSession extends EventEmitter {
         this.audioBuffer = Buffer.alloc(0);
 
         try {
-            const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId);
+            const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId, this.inputSampleRate);
             
             if (!tempFile || typeof tempFile !== 'string') {
                 console.error('[WhisperSTT] Invalid temp file path:', tempFile);
@@ -229,7 +235,10 @@ class WhisperProvider {
         // in the MCP config flows here as config.language). whisper wants a bare
         // code like 'de'; strip any region suffix such as 'de-DE'.
         const language = config.language ? String(config.language).split('-')[0].toLowerCase() : 'auto';
-        const session = new WhisperSTTSession(model, this.whisperService, sessionId, { language });
+        const session = new WhisperSTTSession(model, this.whisperService, sessionId, {
+            language,
+            sampleRate: config.sampleRate,
+        });
         
         // Log session creation
         console.log(`[WhisperProvider] Created session: ${sessionId}`);

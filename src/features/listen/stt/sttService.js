@@ -215,11 +215,15 @@ class SttService {
                     if (finalText.length > 2) {
                         this.debounceMyCompletion(finalText);
 
+                        // Stream the accumulated text as a PARTIAL only; the single
+                        // final line is emitted by flushMyCompletion after the
+                        // debounce. (Sending isFinal per chunk here duplicated every
+                        // utterance in the listen UI.)
                         this.sendToRenderer('stt-update', {
                             speaker: 'Me',
-                            text: finalText,
-                            isPartial: false,
-                            isFinal: true,
+                            text: this.myCompletionBuffer,
+                            isPartial: true,
+                            isFinal: false,
                             timestamp: Date.now(),
                         });
                     } else {
@@ -339,11 +343,15 @@ class SttService {
                     if (finalText.length > 2) {
                         this.debounceTheirCompletion(finalText);
 
+                        // Stream the accumulated text as a PARTIAL only; the single
+                        // final line is emitted by flushTheirCompletion after the
+                        // debounce. (Sending isFinal per chunk here duplicated every
+                        // utterance in the listen UI.)
                         this.sendToRenderer('stt-update', {
                             speaker: 'Them',
-                            text: finalText,
-                            isPartial: false,
-                            isFinal: true,
+                            text: this.theirCompletionBuffer,
+                            isPartial: true,
+                            isFinal: false,
                             timestamp: Date.now(),
                         });
                     } else {
@@ -462,6 +470,11 @@ class SttService {
             apiKey: this.modelInfo.apiKey,
             model: this.modelInfo.model,
             language: effectiveLanguage,
+            // PCM sample rate for the local Whisper WAV header. The live Electron
+            // renderer pipeline captures at 24 kHz; the batch transcribe_audio
+            // path injects its real rate via the model-info override. Only the
+            // whisper provider reads this.
+            sampleRate: this.modelInfo.sampleRate || 24000,
             usePortkey: this.modelInfo.provider === 'openai-glass',
             portkeyVirtualKey: this.modelInfo.provider === 'openai-glass' ? this.modelInfo.apiKey : undefined,
         };
